@@ -1,0 +1,57 @@
+SET  default_parallel $parallel
+SET  pig.tmpfilecompression true
+SET  pig.tmpfilecompression.codec lzo
+SET  pig.maxCombinedSplitSize 134217728
+ 
+REGISTER '/usr/lib/pig-0.10.0/contrib/datafu-0.0.4/dist/datafu-0.0.4.jar';
+DEFINE haversineMiles datafu.pig.geo.HaversineDistInMiles();
+ 
+Songs = LOAD '$input';
+--"Project early and often"
+Projected = FOREACH Songs GENERATE
+        (double) $6 AS artistLat, (double) $8 AS artistLong, $12 AS artistName,
+        (double) $43 AS songHotness, $51 AS songTitle, (int) $52 AS songPreview;
+ 
+--"Filter early and often"
+Filtered = FILTER Projected BY (songHotness &gt;= $hotness) AND
+    (artistLat IS NOT NULL) AND (artistLong IS NOT NULL);
+--"Copy useful fields from Popluar relation"
+Filtered2 = FOREACH Filtered GENERATE songPreview as song2Preview, artistLat AS
+    artist2Lat, artistLong AS artist2Long;
+ 
+--"Produce all pairs of different songs and calculate distance between localizations
+   of their artists"
+Crossed = CROSS Filtered, Filtered2;
+Different = FILTER Crossed BY songPreview != song2Preview;
+Distanced = FOREACH Different GENERATE artistLat..songPreview,
+        haversineMiles(artistLat, artistLong, artist2Lat, artist2Long) as distance;
+ 
+--"For each song, calculate average distance between its artists and all other artists"
+Grouped = GROUP Distanced BY artistLat..songPreview;
+AvgDistanced = FOREACH Grouped {
+        Distances = Distanced.distance;
+        GENERATE FLATTEN(group), AVG(Distances) AS distanceAvg;
+}
+ 
+--"Find the most popular song for a given location"
+Locationed = GROUP AvgDistanced BY (artistLat, artistLong);
+Popular = FOREACH Locationed {
+        OrderedSongs = ORDER AvgDistanced BY songHotness DESC;
+        TopSong = LIMIT OrderedSongs 1;
+        GENERATE FLATTEN(TopSong);
+}
+--"Find the most isolated songs which were recored by artists
+    who live far away from other artists"
+Ordered = ORDER Popular BY distanceAvg DESC;
+Limited = LIMIT Ordered $topCount;
+ 
+--"Generate results in such a format that can be easily displayed
+   by Google Maps (by copy &amp; paste)"
+Displayed = FOREACH Limited GENERATE
+        CONCAT('[', (chararray) artistLat), artistLong, songPreview,
+        CONCAT('"', CONCAT((chararray) songTitle, '"')),
+        CONCAT('"', CONCAT((chararray) artistName, '"')),
+        songHotness,
+        CONCAT((chararray)distanceAvg, '],');
+ 
+STORE Displayed INTO '$output' USING PigStorage(',');
